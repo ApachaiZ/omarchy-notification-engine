@@ -154,6 +154,8 @@ Item {
   // The merged archive is written once; only then can the old archive file be
   // removed without losing the entries it contributed.
   property bool legacyArchiveCleanupPending: false
+  property bool archiveWritePending: false
+  property bool archiveRewritePending: false
   property bool legacyArchiveRequested: false
   property bool historyArchiveStarted: false
   property string archiveWriteSignature: ""
@@ -473,19 +475,39 @@ Item {
     })
     var json = payload + "\n"
     if (json === service.archiveWriteSignature) return
-    service.archiveWriteSignature = json
+    if (service.archiveWritePending) {
+      service.archiveRewritePending = true
+      return
+    }
+    service.archiveWritePending = true
     // The archive holds private notification text and lives outside the 0700
     // subdirectories. Write it through the serialized file queue with a
     // private umask, atomically, and chmod so an older 0644 archive is fixed.
-    // The JSON travels on stdin, never in argv.
+    // The JSON travels on stdin, never in argv. The signature and the
+    // destructive legacy cleanup are committed only after the replacement
+    // succeeded; a full disk or rename failure leaves the old archive intact
+    // for the next retry.
     enqueuePopupFileJob(["bash", "-c",
       'umask 077\n' +
       'tmp="$1.tmp"\n' +
-      'IFS= read -r json || exit 0\n' +
-      'printf \'%s\\n\' "$json" > "$tmp" || exit 0\n' +
-      'chmod 600 "$tmp" && mv -f "$tmp" "$1"',
+      'IFS= read -r json || exit 1\n' +
+      'printf \'%s\\n\' "$json" > "$tmp" || { rm -f "$tmp"; exit 1; }\n' +
+      'chmod 600 "$tmp" || { rm -f "$tmp"; exit 1; }\n' +
+      'mv -f "$tmp" "$1" || { rm -f "$tmp"; exit 1; }',
       "--", service.archivePath],
-      service.finishLegacyMigration, payload)
+      function(ok) {
+        service.archiveWritePending = false
+        if (ok) {
+          service.archiveWriteSignature = json
+          service.finishLegacyMigration()
+        } else {
+          console.warn("notifications: archive write failed; keeping the previous archive for retry")
+        }
+        if (service.archiveRewritePending) {
+          service.archiveRewritePending = false
+          service.scheduleArchiveSave()
+        }
+      }, payload)
   }
 
   function maybeFinalizeArchive() {
@@ -894,12 +916,12 @@ Item {
         service.runningPopupFileInput = ""
       }
     }
-    onExited: {
+    onExited: function(exitCode) {
       var done = service.runningPopupFileJobDone
       service.runningPopupFileJobDone = null
       if (done) {
         try {
-          done()
+          done(Number(exitCode) === 0)
         } catch (e) {
           console.warn("notifications: file job callback failed:", e)
         }
