@@ -81,7 +81,9 @@ are private user state; the private directories are created with mode `0700`.
 - State files and image copies stay local; state directories are `0700` and
   the archive JSON is written atomically with mode `0600`, so other local users
   cannot read notification text even where the parent directory is
-  traversable. The JSON is passed on stdin, never in process arguments.
+  traversable. Live popup JSON and copied images use the same private umask
+  and modes, including on the first notification before startup initialization
+  has finished. The JSON is passed on stdin, never in process arguments.
 
 ## Remove
 

@@ -507,7 +507,11 @@ Item {
       finish()
       return
     }
-    var command = ["bash", "-c", "mkdir -p \"$1\" || exit 0\nshift\n" + service.copyImagesScript, "--", imagesDir]
+    var command = ["bash", "-c",
+      "umask 077\n" +
+      "mkdir -p \"$1\" || exit 0\n" +
+      "chmod 700 \"$1\" 2>/dev/null || true\n" +
+      "shift\n" + service.copyImagesScript, "--", imagesDir]
     for (var i = 0; i < persistable.copies.length; i++)
       command.push(persistable.copies[i].from, persistable.copies[i].to)
     enqueuePopupFileJob(command, finish)
@@ -782,9 +786,11 @@ Item {
   Process {
     id: ensureDirsProc
     command: ["bash", "-c",
+      'umask 077\n' +
       'mkdir -p "$1" "$2" "$3" "$4"\n' +
       'chmod 700 "$2" "$3" "$4"\n' +
       'chmod 600 "$5" 2>/dev/null || true\n' +
+      'chmod 600 "$2"/*.json "$3"/*.json "$4"/* 2>/dev/null || true\n' +
       'rm -f "$5.tmp"',
       "--", service.stateDir, service.popupStateDir, service.historyDir,
       service.imagesDir, service.archivePath]
@@ -898,12 +904,16 @@ Item {
     var persistable = NotificationLogic.persistablePopup(snapshot, imagesDir)
     service.persistedEntries[NotificationLogic.imageStem(snapshot)] = persistable.entry
     var command = ["bash", "-c",
+      "umask 077\n" +
       "mkdir -p \"$1\" \"$2\" || exit 0\n" +
+      "chmod 700 \"$1\" \"$2\" 2>/dev/null || true\n" +
       "dir=\"$1\" name=\"$3\"\n" +
       "shift 3\n" +
       copyImagesScript +
       "IFS= read -r json || exit 0\n" +
-      "printf '%s\\n' \"$json\" > \"$dir/$name\"", "--",
+      "tmp=\"$dir/$name.tmp\"\n" +
+      "printf '%s\\n' \"$json\" > \"$tmp\" || { rm -f \"$tmp\"; exit 0; }\n" +
+      "chmod 600 \"$tmp\" && mv -f \"$tmp\" \"$dir/$name\" || rm -f \"$tmp\"", "--",
       popupStateDir,
       imagesDir,
       NotificationLogic.popupFileName(snapshot)]
