@@ -441,15 +441,27 @@ Item {
 
   function flushArchive() {
     if (!service.archiveLoaded) return
-    var json = JSON.stringify({
+    var payload = JSON.stringify({
       version: 1,
       legacyMerged: true,
       historyMerged: true,
       entries: service.archiveEntries
-    }) + "\n"
+    })
+    var json = payload + "\n"
     if (json === service.archiveWriteSignature) return
     service.archiveWriteSignature = json
-    archiveFile.setText(json)
+    // The archive holds private notification text and lives outside the 0700
+    // subdirectories. Write it through the serialized file queue with a
+    // private umask, atomically, and chmod so an older 0644 archive is fixed.
+    // The JSON travels on stdin, never in argv.
+    enqueuePopupFileJob(["bash", "-c",
+      'umask 077\n' +
+      'tmp="$1.tmp"\n' +
+      'IFS= read -r json || exit 0\n' +
+      'printf \'%s\\n\' "$json" > "$tmp" || exit 0\n' +
+      'chmod 600 "$tmp" && mv -f "$tmp" "$1"',
+      "--", service.archivePath],
+      service.finishLegacyMigration, payload)
   }
 
   function maybeFinalizeArchive() {
@@ -770,8 +782,12 @@ Item {
   Process {
     id: ensureDirsProc
     command: ["bash", "-c",
-      'mkdir -p "$1" "$2" "$3" "$4" && chmod 700 "$2" "$3" "$4"',
-      "--", service.stateDir, service.popupStateDir, service.historyDir, service.imagesDir]
+      'mkdir -p "$1" "$2" "$3" "$4"\n' +
+      'chmod 700 "$2" "$3" "$4"\n' +
+      'chmod 600 "$5" 2>/dev/null || true\n' +
+      'rm -f "$5.tmp"',
+      "--", service.stateDir, service.popupStateDir, service.historyDir,
+      service.imagesDir, service.archivePath]
     running: false
     onExited: service.startArchiveLoad()
   }
@@ -1189,7 +1205,6 @@ Item {
     watchChanges: false
     atomicWrites: true
     printErrors: false
-    onSaved: service.finishLegacyMigration()
     onLoaded: {
       if (service.archiveFileLoaded) return
       var raw = text()
