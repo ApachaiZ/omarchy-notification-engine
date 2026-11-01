@@ -48,6 +48,11 @@ The same file carries two security switches, both on by default:
 - **DND bypass** — let Omarchy confirmation toasts and critical `notify-send`
   messages through Do Not Disturb. Turn it off to silence them too.
 
+On first start the engine merges any pre-split archive from
+`~/.local/state/omarchy/notifications-center/` into its own archive, then
+deletes the old archive file once the merged copy is saved. Its image copies
+are pruned with the entries that reference them and removed by a clear.
+
 Without the center the engine captures by default. The current archive lives in
 `~/.local/state/omarchy/notifications-archive.json`; live toasts and their
 copied images live under `~/.local/state/omarchy/notifications/`. All of these
@@ -80,7 +85,9 @@ omarchy plugin remove apach.notification-engine
 omarchy plugin enable omarchy.notifications
 ```
 
-History is left untouched.
+History is left untouched. Clearing history also removes the pre-split
+`notifications-center/` archive and its image copies, so a clear leaves no
+second copy on disk.
 
 ## Development
 

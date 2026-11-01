@@ -135,7 +135,8 @@ Item {
   // Kept beside settingsPath, not inside popupStateDir: restorePopupsProc
   // globs every *.json in the live directory.
   readonly property string archivePath: stateDir + "notifications-archive.json"
-  readonly property string legacyArchivePath: home + "/.local/state/omarchy/notifications-center/archive.json"
+  readonly property string legacyDir: home + "/.local/state/omarchy/notifications-center"
+  readonly property string legacyArchivePath: legacyDir + "/archive.json"
   property var archiveEntries: []
   property bool archiveLoaded: false
   // Persisted image paths for live rows, keyed by stem. Archiving a toast uses
@@ -145,6 +146,9 @@ Item {
   property bool legacyArchiveLoaded: false
   property bool historyArchiveLoaded: false
   property bool archiveLoadStarted: false
+  // The merged archive is written once; only then can the old archive file be
+  // removed without losing the entries it contributed.
+  property bool legacyArchiveCleanupPending: false
   property bool legacyArchiveRequested: false
   property bool historyArchiveStarted: false
   property string archiveWriteSignature: ""
@@ -360,6 +364,9 @@ Item {
     service.archiveEntries = []
     service.cleanupImages(removed)
     service.scheduleArchiveSave()
+    // The pre-split archive and its image copies are not used anymore; a
+    // clear must leave no copy of the cleared history behind.
+    enqueuePopupFileJob(["bash", "-c", 'rm -rf "$1"', "--", service.legacyDir])
   }
 
   // Kept as the IPC-facing name used by `notifications clear`.
@@ -382,8 +389,8 @@ Item {
     }
     if (stems.length === 0) return
     var command = ["bash", "-c",
-      'dir="$1"; shift; for stem in "$@"; do rm -f "$dir/$stem"-*; done',
-      "--", imagesDir]
+      'new="$1"; old="$2"; shift 2; for stem in "$@"; do rm -f "$new/$stem"-* "$old/$stem"-*; done',
+      "--", imagesDir, service.legacyDir + "/images"]
     for (var k = 0; k < stems.length; k++) command.push(stems[k])
     enqueuePopupFileJob(command)
   }
@@ -421,8 +428,8 @@ Item {
     }
     if (stems.length === 0) return
     var command = ["bash", "-c",
-      'dir="$1"; shift; for stem in "$@"; do rm -f "$dir/$stem"-*; done',
-      "--", imagesDir]
+      'new="$1"; old="$2"; shift 2; for stem in "$@"; do rm -f "$new/$stem"-* "$old/$stem"-*; done',
+      "--", imagesDir, service.legacyDir + "/images"]
     for (var n = 0; n < stems.length; n++) command.push(stems[n])
     enqueuePopupFileJob(command)
   }
@@ -449,9 +456,18 @@ Item {
     if (service.archiveLoaded) return
     if (!service.archiveFileLoaded || !service.legacyArchiveLoaded || !service.historyArchiveLoaded) return
     service.archiveLoaded = true
+    service.legacyArchiveCleanupPending = true
     service.pruneArchive()
     service.scheduleArchiveSave()
     service.sweepTempImages()
+  }
+
+  // Called once the merged archive has actually been saved: the old archive
+  // file must not keep a second copy of the history on disk.
+  function finishLegacyMigration() {
+    if (!service.legacyArchiveCleanupPending) return
+    service.legacyArchiveCleanupPending = false
+    enqueuePopupFileJob(["bash", "-c", 'rm -f "$1"', "--", service.legacyArchivePath])
   }
 
   function sweepTempImages() {
@@ -1173,6 +1189,7 @@ Item {
     watchChanges: false
     atomicWrites: true
     printErrors: false
+    onSaved: service.finishLegacyMigration()
     onLoaded: {
       if (service.archiveFileLoaded) return
       var raw = text()
