@@ -64,7 +64,9 @@ are private user state; the private directories are created with mode `0700`.
   schemes are dropped; `<img>` tags are stripped from bodies before Qt parses
   them. App names, summaries and bodies are capped (256/512/8192 characters)
   at ingestion and when history is reloaded, so one sender cannot exhaust
-  memory or bloat the state files.
+  memory or bloat the state files. Every `Text` element sets
+  `Text.PlainText`, except the body, which is `Text.StyledText` only after the
+  image tags have been stripped; `tests/qml-text.test.mjs` enforces this.
 - The Omarchy `omarchy-exec-argv` action hint runs only after an explicit click
   and is an argv vector, never a shell string. It is capped (64 arguments,
   4 KiB each, 16 KiB total) and refuses NUL bytes. Any session-bus process can
