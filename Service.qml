@@ -474,8 +474,15 @@ Item {
       entries: service.archiveEntries
     })
     var json = payload + "\n"
-    if (json === service.archiveWriteSignature) return
-    if (service.archiveWritePending) {
+    // The desired state is compared against the last completed write AND the
+    // in-flight one. A→B→A (append, clear while B is still writing) must not
+    // early-return as "already saved": the pending write would otherwise
+    // resurrect the cleared text. "rewrite" flags a corrective save after
+    // the in-flight write lands, even when it fails.
+    var decision = NotificationLogic.archiveFlushDecision(
+      json, service.archiveWriteSignature, service.archiveWritePending)
+    if (decision === "idle") return
+    if (decision === "rewrite") {
       service.archiveRewritePending = true
       return
     }

@@ -63,6 +63,25 @@ test("oversized history rows are clipped when loaded from disk", () => {
   assert.equal(row.body.length, Logic.limits.body)
 })
 
+test("archive writes recheck the pending state (A to B to A)", () => {
+  const d = Logic.archiveFlushDecision
+  const empty = JSON.stringify({ version: 1, legacyMerged: true, historyMerged: true, entries: [] }) + "\n"
+  const nonempty = JSON.stringify({ version: 1, legacyMerged: true, historyMerged: true, entries: [{ stem: "1-2" }] }) + "\n"
+  // Desired state equals the last completed write and nothing is pending.
+  assert.equal(d(empty, empty, false), "idle")
+  assert.equal(d(nonempty, nonempty, false), "idle")
+  // Desired state differs and nothing is pending: write now.
+  assert.equal(d(nonempty, empty, false), "write")
+  // A write is pending and the desired state differs: flag a rewrite.
+  assert.equal(d(nonempty, empty, true), "rewrite")
+  // The reported case: append B (queued), Clear back to A while B is still
+  // writing. The early return must still schedule a corrective save instead
+  // of letting B resurrect the cleared private text.
+  assert.equal(d(empty, empty, true), "rewrite")
+  // Clear back to A while an unrelated C is pending must also recheck.
+  assert.equal(d(empty, nonempty, true), "rewrite")
+})
+
 test("click actions are structurally bounded", () => {
   assert.deepEqual(Logic.parseExecArgv('["mpv","--","/tmp/a b.mp4"]'), ["mpv", "--", "/tmp/a b.mp4"])
   assert.equal(Logic.parseExecArgv(JSON.stringify(new Array(Logic.execLimits.args + 1).fill("x"))), null)

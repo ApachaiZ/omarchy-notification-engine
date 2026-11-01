@@ -448,6 +448,17 @@ function parsePopupFiles(raw, normalUrgency) {
 // A restore-reset deadline outranks the original timestamp: without it, a
 // second restart would judge a re-shown toast by a clock that no longer
 // governs its display and drop it while it is still on screen.
+// The archive writer serializes full rewrites. Given the JSON the caller
+// wants on disk (json), the payload of the last completed write (signature)
+// and whether a write is currently queued/in flight (pending), decide the
+// next step. "idle" means the desired state is already durable; "rewrite"
+// means a different payload is in flight and the desired state must be
+// re-written once it lands; "write" starts a new write now.
+function archiveFlushDecision(json, signature, pending) {
+  if (json === signature) return pending ? "rewrite" : "idle"
+  return pending ? "rewrite" : "write"
+}
+
 function popupExpired(entry, duration, now) {
   var deadline = Number((entry || {}).deadline || 0)
   if (isFinite(deadline) && deadline > 0) return Number(now) >= deadline
@@ -562,6 +573,7 @@ if (typeof module !== "undefined") {
     serializePopup: serializePopup,
     parsePopupFiles: parsePopupFiles,
     popupExpired: popupExpired,
-    popupPlacement: popupPlacement
+    popupPlacement: popupPlacement,
+    archiveFlushDecision: archiveFlushDecision
   }
 }

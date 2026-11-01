@@ -87,7 +87,10 @@ are private user state; the private directories are created with mode `0700`.
   and modes, including on the first notification before startup initialization
   has finished. Images for expired or overflow entries are cleaned after live
   popups have been restored, so the startup merge cannot skip them. The JSON is
-  passed on stdin, never in process arguments.
+  passed on stdin, never in process arguments. A save that finds a different
+  payload still queued is flagged for a corrective rewrite, so clearing history
+  while a write is in flight cannot resurrect the cleared text after a
+  restart.
 
 ## Remove
 
