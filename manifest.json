@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "apach.notification-engine",
+  "name": "Notification Engine",
+  "version": "1.0.0",
+  "author": "ApachaiZ",
+  "license": "GPL-3.0",
+  "description": "Notification daemon for Omarchy: owns the freedesktop notification server, displays toasts, keeps optional history, and replaces omarchy.notifications while enabled.",
+  "kinds": [
+    "service"
+  ],
+  "entryPoints": {
+    "service": "Service.qml"
+  },
+  "keepLoaded": true,
+  "omarchy": {
+    "clonedFrom": "omarchy.notifications"
+  }
+}
