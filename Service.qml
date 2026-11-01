@@ -1457,30 +1457,65 @@ Item {
             implicitHeight: card.implicitHeight
 
             readonly property real lifetime: service.durationFor(cardSlot.urgency, cardSlot.expireTimeout)
-            property real remainingLifetime: 1.0
-            readonly property bool ticking: cardSlot.lifetime > 0 && !card.hovered
+            // One deadline instead of a 20 Hz poll. The timer sleeps until the
+            // toast expires; hovering pauses it by storing the remaining time.
+            property double deadline: 0
+            property real remainingMs: 0
+
+            function armLifetime() {
+              expiry.stop()
+              if (cardSlot.lifetime <= 0) {
+                cardSlot.deadline = 0
+                cardSlot.remainingMs = 0
+                return
+              }
+              cardSlot.remainingMs = cardSlot.lifetime
+              if (!card.hovered) cardSlot.startLifetime()
+            }
+
+            function startLifetime() {
+              if (cardSlot.remainingMs <= 0) return
+              cardSlot.deadline = Date.now() + cardSlot.remainingMs
+              expiry.interval = Math.max(1, Math.round(cardSlot.remainingMs))
+              expiry.restart()
+            }
+
+            function pauseLifetime() {
+              if (expiry.running)
+                cardSlot.remainingMs = Math.max(0, cardSlot.deadline - Date.now())
+              expiry.stop()
+            }
+
+            function resumeLifetime() {
+              if (cardSlot.remainingMs <= 0) return
+              cardSlot.startLifetime()
+            }
 
             // A client updating this notification in place rewrites the row
             // under the card (see refreshPopup). New text deserves a full look,
             // so the countdown starts over instead of running out the clock the
-            // superseded text was already most of the way through. Delegates
-            // keep their own row as the model changes around them, so only a
-            // real content change lands here.
-            onSummaryChanged: cardSlot.remainingLifetime = 1.0
-            onBodyChanged: cardSlot.remainingLifetime = 1.0
-            onImageChanged: cardSlot.remainingLifetime = 1.0
+            // superseded text was already most of the way through.
+            Component.onCompleted: armLifetime()
+            onLifetimeChanged: armLifetime()
+            onSummaryChanged: armLifetime()
+            onBodyChanged: armLifetime()
+            onImageChanged: armLifetime()
+
+            Connections {
+              target: card
+              function onHoveredChanged() {
+                if (card.hovered) cardSlot.pauseLifetime()
+                else cardSlot.resumeLifetime()
+              }
+            }
 
             Timer {
-              interval: 50
-              repeat: true
-              running: cardSlot.ticking
+              id: expiry
+              repeat: false
               onTriggered: {
-                if (cardSlot.lifetime <= 0) return
-                cardSlot.remainingLifetime -= 50.0 / cardSlot.lifetime
-                if (cardSlot.remainingLifetime <= 0) {
-                  cardSlot.remainingLifetime = 0
-                  service.expirePopup(cardSlot.index)
-                }
+                cardSlot.remainingMs = 0
+                cardSlot.deadline = 0
+                service.expirePopup(cardSlot.index)
               }
             }
 
