@@ -210,6 +210,21 @@ function shouldRenderCompactGlyph(glyph, iconSource, singleLineToast) {
   return String(glyph || "").length > 0 && String(iconSource || "").length === 0 && !!singleLineToast
 }
 
+// Hard caps for everything that gets rendered, archived and kept in memory.
+// Notification senders are untrusted: a single 20 MB body would otherwise be
+// copied into the popup model, the state file and the archive. Caps are in
+// UTF-16 code units and are generous for real notifications; text is cut,
+// never wrapped or re-parsed, so the renderers stay linear.
+var MAX_APP_LENGTH = 256
+var MAX_GLYPH_LENGTH = 16
+var MAX_SUMMARY_LENGTH = 512
+var MAX_BODY_LENGTH = 8192
+
+function clipText(value, max) {
+  var text = String(value || "").replace(/\u0000/g, "")
+  return text.length > max ? text.slice(0, max) : text
+}
+
 function snapshotOf(notification, timestamp) {
   var n = notification || {}
   var id = n.id || 0
@@ -218,12 +233,12 @@ function snapshotOf(notification, timestamp) {
   return {
     id: id,
     originalId: id,
-    app: n.appName || "",
+    app: clipText(n.appName, MAX_APP_LENGTH),
     appIcon: safeAppIcon(n.appIcon || ""),
-    summary: String(n.summary || ""),
-    body: n.body || "",
+    summary: clipText(n.summary, MAX_SUMMARY_LENGTH),
+    body: clipText(n.body, MAX_BODY_LENGTH),
     image: safeImageSource(n.image || ""),
-    glyph: glyphFromHints(n.hints),
+    glyph: clipText(glyphFromHints(n.hints), MAX_GLYPH_LENGTH),
     execArgv: execArgvFromHints(n.hints),
     urgency: n.urgency,
     expireTimeout: expireTimeout,
@@ -269,12 +284,12 @@ function historyEntry(value, normalUrgency) {
   return {
     id: e.id || 0,
     originalId: e.originalId || e.id || 0,
-    app: e.app || "",
+    app: clipText(e.app, MAX_APP_LENGTH),
     appIcon: safeAppIcon(e.appIcon || ""),
-    summary: e.summary || "",
-    body: e.body || "",
+    summary: clipText(e.summary, MAX_SUMMARY_LENGTH),
+    body: clipText(e.body, MAX_BODY_LENGTH),
     image: safeImageSource(e.image || ""),
-    glyph: e.glyph || "",
+    glyph: clipText(e.glyph, MAX_GLYPH_LENGTH),
     execArgv: e.execArgv || "",
     urgency: typeof e.urgency === "number" ? e.urgency : normalUrgency,
     expireTimeout: 0,
@@ -496,6 +511,13 @@ if (typeof module !== "undefined") {
   module.exports = {
     isChromiumDerived: isChromiumDerived,
     sanitizeBody: sanitizeBody,
+    clipText: clipText,
+    limits: {
+      app: MAX_APP_LENGTH,
+      glyph: MAX_GLYPH_LENGTH,
+      summary: MAX_SUMMARY_LENGTH,
+      body: MAX_BODY_LENGTH
+    },
     safeImageSource: safeImageSource,
     safeAppIcon: safeAppIcon,
     styledSanitizedBody: styledSanitizedBody,

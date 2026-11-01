@@ -39,3 +39,26 @@ test("popup placement clamps a centered panel to the top", () => {
   assert.equal(Logic.popupPlacement("center-center", "top", 26, 8).vertical, "top")
   assert.equal(Logic.popupPlacement("bottom-right", "top", 26, 8).vertical, "bottom")
 })
+
+test("oversized notification text is clipped at ingestion", () => {
+  const huge = "x".repeat(20000)
+  const snap = Logic.snapshotOf({
+    id: 1, appName: "a".repeat(400), appIcon: "firefox",
+    summary: huge, body: huge, image: "", hints: { "omarchy-glyph": "g".repeat(40) },
+    urgency: 1, expireTimeout: 0
+  }, 5)
+  assert.equal(snap.app.length, Logic.limits.app)
+  assert.equal(snap.summary.length, Logic.limits.summary)
+  assert.equal(snap.body.length, Logic.limits.body)
+  assert.equal(snap.glyph.length, Logic.limits.glyph)
+  assert.equal(Logic.clipText("a\u0000b", 10), "ab")
+})
+
+test("oversized history rows are clipped when loaded from disk", () => {
+  const row = Logic.historyEntry({
+    app: "a".repeat(400), summary: "s".repeat(2000), body: "b".repeat(20000)
+  }, 1)
+  assert.equal(row.app.length, Logic.limits.app)
+  assert.equal(row.summary.length, Logic.limits.summary)
+  assert.equal(row.body.length, Logic.limits.body)
+})

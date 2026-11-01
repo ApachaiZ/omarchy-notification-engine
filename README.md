@@ -50,7 +50,9 @@ are private user state; the private directories are created with mode `0700`.
 
 - Notifications are untrusted input. Remote image URLs and non-local URI
   schemes are dropped; `<img>` tags are stripped from bodies before Qt parses
-  them.
+  them. App names, summaries and bodies are capped (256/512/8192 characters)
+  at ingestion and when history is reloaded, so one sender cannot exhaust
+  memory or bloat the state files.
 - The Omarchy `omarchy-exec-argv` action hint runs only after an explicit click
   and is an argv vector, never a shell string. Any session-bus process can set
   it, so treat notifications from untrusted apps as same-user code execution.
