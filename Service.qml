@@ -139,6 +139,11 @@ Item {
   readonly property string legacyArchivePath: legacyDir + "/archive.json"
   property var archiveEntries: []
   property bool archiveLoaded: false
+  // Image cleanup must wait until restorePopups() has put every surviving
+  // live row in popupModel; otherwise a dropped archive entry's stem could
+  // delete an image a live toast still needs.
+  property bool popupsRestored: false
+  property var pendingDroppedImages: []
   // Persisted image paths for live rows, keyed by stem. Archiving a toast uses
   // these copies instead of re-copying its sender-owned originals.
   property var persistedEntries: ({})
@@ -292,7 +297,7 @@ Item {
         dropped.push(merged[k])
     }
     service.archiveEntries = keep
-    if (service.archiveLoaded) service.cleanupImages(dropped)
+    service.queueImageCleanup(dropped)
   }
 
   function appendArchiveEntry(value) {
@@ -322,7 +327,7 @@ Item {
       list = list.slice(0, service.archiveLimit)
     }
     service.archiveEntries = list
-    if (service.archiveLoaded) service.cleanupImages(dropped)
+    service.queueImageCleanup(dropped)
     service.scheduleArchiveSave()
   }
 
@@ -339,7 +344,7 @@ Item {
         dropped.push(list[i])
     }
     service.archiveEntries = keep
-    service.cleanupImages(dropped)
+    service.queueImageCleanup(dropped)
   }
 
   function removeArchiveEntry(stem) {
@@ -354,7 +359,7 @@ Item {
     }
     if (removed.length === 0) return false
     service.archiveEntries = keep
-    service.cleanupImages(removed)
+    service.queueImageCleanup(removed)
     service.scheduleArchiveSave()
     return true
   }
@@ -362,7 +367,7 @@ Item {
   function clearArchive() {
     var removed = service.archiveEntries
     service.archiveEntries = []
-    service.cleanupImages(removed)
+    service.queueImageCleanup(removed)
     service.scheduleArchiveSave()
     // The pre-split archive and its image copies are not used anymore; a
     // clear must leave no copy of the cleared history behind.
@@ -406,6 +411,25 @@ Item {
     }
     service.removeArchiveEntry(needle)
     return true
+  }
+
+  // Queue image removal until restorePopups() has rebuilt popupModel. The
+  // startup merge drops expired/overflow entries while archiveLoaded is still
+  // false; without this queue their images would never be removed.
+  function queueImageCleanup(entries) {
+    if (!entries || entries.length === 0) return
+    if (!service.popupsRestored) {
+      service.pendingDroppedImages = service.pendingDroppedImages.concat(entries)
+      return
+    }
+    service.cleanupImages(entries)
+  }
+
+  function flushPendingImageCleanup() {
+    if (!service.popupsRestored || service.pendingDroppedImages.length === 0) return
+    var pending = service.pendingDroppedImages
+    service.pendingDroppedImages = []
+    service.cleanupImages(pending)
   }
 
   // Delete images belonging to archive entries that are leaving, unless a
@@ -472,6 +496,7 @@ Item {
     service.pruneArchive()
     service.scheduleArchiveSave()
     service.sweepTempImages()
+    service.flushPendingImageCleanup()
   }
 
   // Called once the merged archive has actually been saved: the old archive
@@ -1074,7 +1099,11 @@ Item {
       }
       live.push(entry)
     }
-    if (live.length === 0) return
+    if (live.length === 0) {
+      service.popupsRestored = true
+      service.flushPendingImageCleanup()
+      return
+    }
 
     Qt.callLater(function() {
       for (var j = 0; j < live.length; j++) {
@@ -1102,6 +1131,8 @@ Item {
         service.restoredPopups[NotificationLogic.popupFileName(restored)] = true
         popupModel.append(restored)
       }
+      service.popupsRestored = true
+      service.flushPendingImageCleanup()
     })
   }
 

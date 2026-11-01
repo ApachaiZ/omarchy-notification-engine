@@ -83,7 +83,9 @@ are private user state; the private directories are created with mode `0700`.
   cannot read notification text even where the parent directory is
   traversable. Live popup JSON and copied images use the same private umask
   and modes, including on the first notification before startup initialization
-  has finished. The JSON is passed on stdin, never in process arguments.
+  has finished. Images for expired or overflow entries are cleaned after live
+  popups have been restored, so the startup merge cannot skip them. The JSON is
+  passed on stdin, never in process arguments.
 
 ## Remove
 
