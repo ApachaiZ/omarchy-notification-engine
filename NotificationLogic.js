@@ -187,9 +187,16 @@ function execArgvFromHints(hints) {
 // accepted. WHICH senders may set this hint is a separate boundary: any
 // session-bus process can, by the freedesktop protocol's design (see
 // docs/notifications.md), which is equivalent to same-uid code execution.
+// Bounds for a click action: enough for real commands (a launcher, a player
+// with a path), far below anything that could be used to grow memory or
+// smuggle a NUL into the exec call.
+var MAX_EXEC_ARGS = 64
+var MAX_EXEC_ARG_LENGTH = 4096
+var MAX_EXEC_TOTAL_LENGTH = 16384
+
 function parseExecArgv(value) {
   var text = String(value || "")
-  if (!text) return null
+  if (!text || text.length > MAX_EXEC_TOTAL_LENGTH) return null
 
   var parsed
   try {
@@ -198,10 +205,15 @@ function parseExecArgv(value) {
     return null
   }
 
-  if (!Array.isArray(parsed) || parsed.length === 0) return null
+  if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > MAX_EXEC_ARGS) return null
+  var total = 0
   for (var i = 0; i < parsed.length; i++) {
     if (typeof parsed[i] !== "string") return null
+    if (parsed[i].indexOf("\u0000") !== -1) return null
+    if (parsed[i].length > MAX_EXEC_ARG_LENGTH) return null
+    total += parsed[i].length
   }
+  if (total > MAX_EXEC_TOTAL_LENGTH) return null
   if (!parsed[0] || parsed[0].charAt(0) === "-") return null
   return parsed
 }
@@ -529,6 +541,11 @@ if (typeof module !== "undefined") {
     glyphFromHints: glyphFromHints,
     execArgvFromHints: execArgvFromHints,
     parseExecArgv: parseExecArgv,
+    execLimits: {
+      args: MAX_EXEC_ARGS,
+      argLength: MAX_EXEC_ARG_LENGTH,
+      total: MAX_EXEC_TOTAL_LENGTH
+    },
     shouldRenderCompactGlyph: shouldRenderCompactGlyph,
     snapshotOf: snapshotOf,
     popupRoles: popupRoles,

@@ -120,6 +120,12 @@ Item {
   // Set by the optional center while it is open, so toasts do not draw over
   // the center. A stock service ignores the IPC.
   property bool centerOpen: false
+  // Read from the center settings. Actions (omarchy-exec-argv) and the DND
+  // bypass both rely on a sender-chosen app name, which any local process can
+  // spoof. They stay on by default for compatibility with Omarchy's own
+  // toasts; the settings expose a hard off switch.
+  property bool allowExecActions: true
+  property bool dndBypass: true
 
   // One archive for both surfaces: a single in-memory list and a single JSON
   // file. The center reads it directly. The old per-file history directory is
@@ -496,7 +502,7 @@ Item {
     // DND bypass rules: chat apps abuse urgency=critical to force
     // visibility, so critical alone isn't enough — we also require the
     // sender to be CLI-style. See shouldBypassDnd().
-    if (service.doNotDisturb && !shouldBypassDnd(notification)) {
+    if (service.doNotDisturb && !(service.dndBypass && shouldBypassDnd(notification))) {
       // The toast never shows, so the only record a silenced notification
       // can leave is a history entry. Write it straight into history —
       // "what did I miss while silenced" is exactly what history is for.
@@ -697,7 +703,9 @@ Item {
 
     // Run the argv (via Util.execArgv, no shell interpretation). Detached so it
     // outlives the shell, which installer toasts depend on: they restart it.
-    var argv = NotificationLogic.parseExecArgv(entry ? entry.execArgv : "")
+    var argv = service.allowExecActions
+      ? NotificationLogic.parseExecArgv(entry ? entry.execArgv : "")
+      : null
     if (argv) {
       Util.execArgv(argv)
       dismissPopup(index)
@@ -1138,6 +1146,8 @@ Item {
     }
     if (parsed && parsed.captureToasts === false) service.captureToasts = false
     else service.captureToasts = true
+    service.allowExecActions = !(parsed && parsed.allowExecActions === false)
+    service.dndBypass = !(parsed && parsed.dndBypass === false)
     if (placement) {
       if (placement.indexOf("center-") === 0)
         placement = "top-" + placement.slice(7)

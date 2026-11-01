@@ -41,6 +41,13 @@ The engine reads the optional center's settings file
 - **Capture toasts Off** — live toasts still display and remain actionable,
   but nothing new is written to history. Existing history is untouched.
 
+The same file carries two security switches, both on by default:
+
+- **Actions** — run the click action (`omarchy-exec-argv`) when a toast is
+  clicked. Turn it off to ignore every action hint.
+- **DND bypass** — let Omarchy confirmation toasts and critical `notify-send`
+  messages through Do Not Disturb. Turn it off to silence them too.
+
 Without the center the engine captures by default. The current archive lives in
 `~/.local/state/omarchy/notifications-archive.json`; live toasts and their
 copied images live under `~/.local/state/omarchy/notifications/`. All of these
@@ -54,8 +61,14 @@ are private user state; the private directories are created with mode `0700`.
   at ingestion and when history is reloaded, so one sender cannot exhaust
   memory or bloat the state files.
 - The Omarchy `omarchy-exec-argv` action hint runs only after an explicit click
-  and is an argv vector, never a shell string. Any session-bus process can set
-  it, so treat notifications from untrusted apps as same-user code execution.
+  and is an argv vector, never a shell string. It is capped (64 arguments,
+  4 KiB each, 16 KiB total) and refuses NUL bytes. Any session-bus process can
+  set it and choose the app name, so a local app can impersonate Omarchy's own
+  sender; treat notifications from untrusted apps as same-user code execution
+  and turn **Actions** off when that matters.
+- **DND bypass** trusts the sender-chosen app name as well (`omarchy-action`,
+  critical `notify-send`). It is a convenience, not an authentication; turn it
+  off to make Do Not Disturb absolute.
 - The engine performs no network access and runs inside the existing
   `omarchy-shell` process.
 - State files and image copies stay local; state directories are `0700`.

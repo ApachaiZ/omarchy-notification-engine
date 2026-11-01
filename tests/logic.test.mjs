@@ -62,3 +62,12 @@ test("oversized history rows are clipped when loaded from disk", () => {
   assert.equal(row.summary.length, Logic.limits.summary)
   assert.equal(row.body.length, Logic.limits.body)
 })
+
+test("click actions are structurally bounded", () => {
+  assert.deepEqual(Logic.parseExecArgv('["mpv","--","/tmp/a b.mp4"]'), ["mpv", "--", "/tmp/a b.mp4"])
+  assert.equal(Logic.parseExecArgv(JSON.stringify(new Array(Logic.execLimits.args + 1).fill("x"))), null)
+  assert.equal(Logic.parseExecArgv(JSON.stringify(["x".repeat(Logic.execLimits.argLength + 1)])), null)
+  assert.equal(Logic.parseExecArgv(JSON.stringify(["ok", "a\u0000b"])), null)
+  assert.equal(Logic.parseExecArgv(JSON.stringify(["x".repeat(Logic.execLimits.total + 1)])), null)
+  assert.equal(Logic.parseExecArgv('["-rf"]'), null)
+})
