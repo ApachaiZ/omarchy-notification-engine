@@ -5,6 +5,8 @@ The notification daemon behind the optional
 It owns the freedesktop notification server, displays the toast stack, handles
 Do Not Disturb, actions and images, and keeps an optional 30-day history.
 
+![Omarchy Notification Engine — The backend behind your alerts.](preview.png)
+
 While enabled it **replaces `omarchy.notifications`**: there is only one
 notification server per session, and the shell's clone guard disables the stock
 service. The center is a separate plugin and is **not required** for the engine
