@@ -231,6 +231,9 @@ var MAX_APP_LENGTH = 256
 var MAX_GLYPH_LENGTH = 16
 var MAX_SUMMARY_LENGTH = 512
 var MAX_BODY_LENGTH = 8192
+var MAX_IMAGE_LENGTH = 2048
+var MAX_ICON_LENGTH = 2048
+var MAX_EXEC_ARGV_LENGTH = 16384
 
 function clipText(value, max) {
   var text = String(value || "").replace(/\u0000/g, "")
@@ -242,16 +245,24 @@ function snapshotOf(notification, timestamp) {
   var id = n.id || 0
   var expireTimeout = Number(n.expireTimeout || 0)
   if (!isFinite(expireTimeout) || expireTimeout < 0) expireTimeout = 0
+  // Quickshell exposes a file path passed through the `image-path` hint as
+  // `image` only when it is a file:// URI. Fall back to the raw hint so an
+  // absolute local path works too; safeImageSource still rejects remote
+  // schemes.
+  var imageHint = stringHint(n.hints, "image-path")
+  var imageValue = String(n.image || "")
+  if (imageValue === "" || imageValue.indexOf("image://") === 0)
+    imageValue = imageHint || imageValue
   return {
     id: id,
     originalId: id,
     app: clipText(n.appName, MAX_APP_LENGTH),
-    appIcon: safeAppIcon(n.appIcon || ""),
+    appIcon: clipText(safeAppIcon(n.appIcon || ""), MAX_ICON_LENGTH),
     summary: clipText(n.summary, MAX_SUMMARY_LENGTH),
     body: clipText(n.body, MAX_BODY_LENGTH),
-    image: safeImageSource(n.image || ""),
+    image: clipText(safeImageSource(imageValue), MAX_IMAGE_LENGTH),
     glyph: clipText(glyphFromHints(n.hints), MAX_GLYPH_LENGTH),
-    execArgv: execArgvFromHints(n.hints),
+    execArgv: clipText(execArgvFromHints(n.hints), MAX_EXEC_ARGV_LENGTH),
     urgency: n.urgency,
     expireTimeout: expireTimeout,
     timestamp: timestamp === undefined ? Date.now() : timestamp
@@ -291,18 +302,47 @@ function replacementSnapshot(notification, originalId, timestamp) {
   return updated
 }
 
+
+// Normalize the on-disk archive format. The current archive is one JSON
+// object with an `entries` array; an older build wrote a bare array or a
+// directory of one-object-per-line files. A single compact file parses as a
+// whole object, so it must fall through to the line parser instead of
+// returning an empty list.
+function archiveDocuments(text) {
+  var raw = String(text || "")
+  var whole = null
+  try { whole = JSON.parse(raw) } catch (e) { whole = null }
+  if (whole) {
+    if (Array.isArray(whole)) return whole
+    if (Array.isArray(whole.entries)) return whole.entries
+  }
+  var out = []
+  var lines = raw.split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim()
+    if (!line) continue
+    try {
+      var value = JSON.parse(line)
+      if (value && typeof value === "object") out.push(value)
+    } catch (e) {
+      // Torn write from a crash mid-save — skip the line, keep the rest.
+    }
+  }
+  return out
+}
+
 function historyEntry(value, normalUrgency) {
   var e = value || {}
   return {
     id: e.id || 0,
     originalId: e.originalId || e.id || 0,
     app: clipText(e.app, MAX_APP_LENGTH),
-    appIcon: safeAppIcon(e.appIcon || ""),
+    appIcon: clipText(safeAppIcon(e.appIcon || ""), MAX_ICON_LENGTH),
     summary: clipText(e.summary, MAX_SUMMARY_LENGTH),
     body: clipText(e.body, MAX_BODY_LENGTH),
-    image: safeImageSource(e.image || ""),
+    image: clipText(safeImageSource(e.image || ""), MAX_IMAGE_LENGTH),
     glyph: clipText(e.glyph, MAX_GLYPH_LENGTH),
-    execArgv: e.execArgv || "",
+    execArgv: clipText(e.execArgv || "", MAX_EXEC_ARGV_LENGTH),
     urgency: typeof e.urgency === "number" ? e.urgency : normalUrgency,
     expireTimeout: 0,
     timestamp: e.timestamp || 0
@@ -497,38 +537,6 @@ function popupPlacement(placement, barPosition, barClearance, gapsOut) {
   }
 }
 
-// The archived files are the history. They are read back exactly like the
-// live popup files, then normalized into history rows: replaying a toast
-// must not inherit the original's expire timeout or restore deadline, so it
-// gets the standard on-screen lifetime for its urgency instead.
-//
-// liveRows are the toasts still on screen when the replay was asked for.
-// They belong in it — they're the newest notifications there are — but the
-// directory read races their archival, so they're carried across by hand and
-// keyed by file name (timestamp + id) to drop the copy the read already saw.
-function historyRows(raw, liveRows, normalUrgency, limit) {
-  var max = limit === undefined || limit === null ? 10 : Number(limit)
-  if (isNaN(max)) max = 10
-  max = Math.max(0, max)
-
-  var out = []
-  var seen = {}
-  function collect(rows) {
-    for (var i = 0; i < rows.length; i++) {
-      var entry = rows[i]
-      if (!entry) continue
-      var key = popupFileName(entry)
-      if (seen[key]) continue
-      seen[key] = true
-      out.push(historyEntry(entry, normalUrgency))
-    }
-  }
-
-  collect(Array.isArray(liveRows) ? liveRows : [])
-  collect(parsePopupFiles(raw, normalUrgency))
-  out.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0) })
-  return out.slice(0, max)
-}
 
 if (typeof module !== "undefined") {
   module.exports = {
@@ -539,7 +547,10 @@ if (typeof module !== "undefined") {
       app: MAX_APP_LENGTH,
       glyph: MAX_GLYPH_LENGTH,
       summary: MAX_SUMMARY_LENGTH,
-      body: MAX_BODY_LENGTH
+      body: MAX_BODY_LENGTH,
+      image: MAX_IMAGE_LENGTH,
+      icon: MAX_ICON_LENGTH,
+      execArgv: MAX_EXEC_ARGV_LENGTH
     },
     safeImageSource: safeImageSource,
     safeAppIcon: safeAppIcon,
@@ -564,7 +575,7 @@ if (typeof module !== "undefined") {
     replacementSnapshot: replacementSnapshot,
     historyEntry: historyEntry,
     parseSettings: parseSettings,
-    historyRows: historyRows,
+    archiveDocuments: archiveDocuments,
     popupEntry: popupEntry,
     popupFileName: popupFileName,
     imageStem: imageStem,

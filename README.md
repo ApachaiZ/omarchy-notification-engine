@@ -38,9 +38,9 @@ The center can be installed separately and works with either service.
 The engine reads the optional center's settings file
 (`~/.local/state/omarchy/notifications-center.json`):
 
-- **Capture toasts On** (default) — received notifications are displayed and
+- **Capture history On** (default) — received notifications are displayed and
   kept in the 30-day history (up to 1000 entries).
-- **Capture toasts Off** — live toasts still display and remain actionable,
+- **Capture history Off** — live toasts still display and remain actionable,
   but nothing new is written to history. Existing history is untouched.
 
 The same file carries two security switches, both on by default:
@@ -50,15 +50,23 @@ The same file carries two security switches, both on by default:
 - **DND bypass** — let Omarchy confirmation toasts and critical `notify-send`
   messages through Do Not Disturb. Turn it off to silence them too.
 
-On first start the engine merges any pre-split archive from
-`~/.local/state/omarchy/notifications-center/` into its own archive, then
-deletes the old archive file once the merged copy is saved. Its image copies
-are pruned with the entries that reference them and removed by a clear.
+On first start the engine merges the pre-split archive from
+`~/.local/state/omarchy/notifications-center/` and any old per-file history
+under `~/.local/state/omarchy/notifications/history/` into its own archive.
+Once the merged copy is saved, the old archive file and per-file history
+directory are removed so a clear or an upgrade leaves no second copy of the
+text on disk. Image copies referenced by surviving entries stay in the legacy
+tree until their entry expires or the history is cleared; a clear removes the
+whole tree, even if it runs during startup.
 
-Without the center the engine captures by default. The current archive lives in
-`~/.local/state/omarchy/notifications-archive.json`; live toasts and their
-copied images live under `~/.local/state/omarchy/notifications/`. All of these
-are private user state; the private directories are created with mode `0700`.
+Without the center the engine captures by default and the **Show recent
+notifications** keybinding replays the newest entries from the archive itself.
+The archive lives in `~/.local/state/omarchy/notifications-archive.json`; live
+toasts and their copied images live under
+`~/.local/state/omarchy/notifications/`. The archive is `0600`; the engine's
+private subdirectories are created with mode `0700`. The shared parent state
+directory is owned by the shell and may be traversable, which is why the files
+inside it never rely on directory permissions alone.
 
 ## Security and privacy
 
@@ -66,15 +74,17 @@ are private user state; the private directories are created with mode `0700`.
   schemes are dropped; `<img>` tags are stripped from bodies before Qt parses
   them. App names, summaries and bodies are capped (256/512/8192 characters)
   at ingestion and when history is reloaded, so one sender cannot exhaust
-  memory or bloat the state files. Every `Text` element sets
+  memory or bloat the state files. Image paths, app icons and the exec hint are
+  capped too (2 KiB / 2 KiB / 16 KiB). Every `Text` element sets
   `Text.PlainText`, except the body, which is `Text.StyledText` only after the
   image tags have been stripped; `tests/qml-text.test.mjs` enforces this.
-- The Omarchy `omarchy-exec-argv` action hint runs only after an explicit click
-  and is an argv vector, never a shell string. It is capped (64 arguments,
-  4 KiB each, 16 KiB total) and refuses NUL bytes. Any session-bus process can
-  set it and choose the app name, so a local app can impersonate Omarchy's own
-  sender; treat notifications from untrusted apps as same-user code execution
-  and turn **Actions** off when that matters.
+- The Omarchy `omarchy-exec-argv` action hint runs after the user clicks a toast
+  (or explicitly invokes the most recent toast through the shell's
+  `notifications invokeLast` IPC) and is an argv vector, never a shell string.
+  It is capped (64 arguments, 4 KiB each, 16 KiB total) and refuses NUL bytes.
+  Any session-bus process can set it and choose the app name, so a local app
+  can impersonate Omarchy's own sender; treat notifications from untrusted apps
+  as same-user code execution and turn **Actions** off when that matters.
 - **DND bypass** trusts the sender-chosen app name as well (`omarchy-action`,
   critical `notify-send`). It is a convenience, not an authentication; turn it
   off to make Do Not Disturb absolute.
@@ -90,7 +100,9 @@ are private user state; the private directories are created with mode `0700`.
   passed on stdin, never in process arguments. A save that finds a different
   payload still queued is flagged for a corrective rewrite, so clearing history
   while a write is in flight cannot resurrect the cleared text after a
-  restart.
+  restart. A failed archive write is retried with backoff instead of being
+  silently dropped. At most eight toasts are shown at once; the oldest is
+  archived when a ninth arrives.
 
 ## Remove
 
@@ -100,8 +112,8 @@ omarchy plugin enable omarchy.notifications
 ```
 
 History is left untouched. Clearing history also removes the pre-split
-`notifications-center/` archive and its image copies, so a clear leaves no
-second copy on disk.
+`notifications-center/` archive, the old per-file history directory, and their
+image copies, so a clear leaves no second copy on disk.
 
 ## Development
 

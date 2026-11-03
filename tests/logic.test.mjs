@@ -40,6 +40,51 @@ test("popup placement clamps a centered panel to the top", () => {
   assert.equal(Logic.popupPlacement("bottom-right", "top", 26, 8).vertical, "bottom")
 })
 
+test("an absolute image-path hint survives ingestion", () => {
+  const snap = Logic.snapshotOf({
+    id: 1, appName: "app", summary: "s", body: "", image: "",
+    hints: { "image-path": "/tmp/preview.png" }, urgency: 1, expireTimeout: 0
+  }, 5)
+  assert.equal(snap.image, "/tmp/preview.png")
+  const provider = Logic.snapshotOf({
+    id: 3, appName: "app", summary: "s", body: "", image: "image://provider/x",
+    hints: { "image-path": "/tmp/preview.png" }, urgency: 1, expireTimeout: 0
+  }, 5)
+  assert.equal(provider.image, "/tmp/preview.png")
+  const remote = Logic.snapshotOf({
+    id: 2, appName: "app", summary: "s", body: "", image: "",
+    hints: { "image-path": "https://tracker.example/p.png" }, urgency: 1, expireTimeout: 0
+  }, 5)
+  assert.equal(remote.image, "")
+})
+
+test("image, icon and exec hints are clipped at ingestion", () => {
+  const huge = "x".repeat(20000)
+  const snap = Logic.snapshotOf({
+    id: 1, appName: "app", appIcon: "/tmp/" + huge,
+    summary: "s", body: "b", image: "file:///tmp/" + huge,
+    hints: { "omarchy-exec-argv": huge }, urgency: 1, expireTimeout: 0
+  }, 5)
+  assert.equal(snap.image.length, Logic.limits.image)
+  assert.equal(snap.appIcon.length, Logic.limits.icon)
+  assert.equal(snap.execArgv.length, Logic.limits.execArgv)
+  const row = Logic.historyEntry({
+    app: "app", image: "file:///tmp/" + huge, appIcon: "/tmp/" + huge,
+    execArgv: huge, urgency: 1
+  }, 1)
+  assert.equal(row.image.length, Logic.limits.image)
+  assert.equal(row.appIcon.length, Logic.limits.icon)
+  assert.equal(row.execArgv.length, Logic.limits.execArgv)
+})
+
+test("a one-file legacy history directory is not dropped", () => {
+  const single = { app: "a", summary: "one", body: "", timestamp: 1, originalId: 2 }
+  assert.deepEqual(Logic.archiveDocuments(JSON.stringify(single)), [single])
+  assert.deepEqual(Logic.archiveDocuments(JSON.stringify([single])), [single])
+  assert.deepEqual(Logic.archiveDocuments(JSON.stringify({ entries: [single] })), [single])
+  assert.deepEqual(Logic.archiveDocuments(JSON.stringify(single) + "\n" + JSON.stringify({ ...single, timestamp: 3 })).length, 2)
+})
+
 test("oversized notification text is clipped at ingestion", () => {
   const huge = "x".repeat(20000)
   const snap = Logic.snapshotOf({

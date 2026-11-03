@@ -34,12 +34,11 @@ Item {
   property var toastScreenNames: []
   // One file per on-screen popup, so live toasts survive shell restarts.
   // A file exists exactly as long as its popup is showing: written when the
-  // toast appears, moved into historyDir when it expires, is dismissed, or is
-  // acted upon.
+  // toast appears and deleted when it is archived, dismissed or acted upon.
   readonly property string popupStateDir: stateDir + "notifications/"
-  // The notifications that already left the screen, one file each, trimmed to
-  // the newest historyLimit. This directory IS the history: `showHistory`
-  // replays exactly what has been moved in here.
+  // Per-file history written by pre-split engines. It is read once at startup
+  // for migration and removed after the unified archive is saved; `showHistory`
+  // replays the archive itself.
   readonly property string historyDir: popupStateDir + "history/"
   // Copies of the avatars/images persisted entries reference — the sender's
   // originals don't outlive the notification (see persistablePopup). Each
@@ -106,7 +105,7 @@ Item {
   }
 
   // popupModel feeds the on-screen toast stack — the only model the service
-  // keeps. Everything a toast leaves behind lives on disk under historyDir.
+  // keeps. Everything a toast leaves behind becomes an archive entry.
   //
   // Aliased as a property so consumers outside this Item's id scope can bind
   // to it. QML ids aren't visible to external consumers without the alias.
@@ -147,6 +146,10 @@ Item {
   // Persisted image paths for live rows, keyed by stem. Archiving a toast uses
   // these copies instead of re-copying its sender-owned originals.
   property var persistedEntries: ({})
+  // Original sender values behind each persisted copy. An in-place update
+  // compares against these so unchanged images are not copied again.
+  property var persistedSources: ({})
+  property var pendingPopupWrites: ({})
   property bool archiveFileLoaded: false
   property bool legacyArchiveLoaded: false
   property bool historyArchiveLoaded: false
@@ -159,14 +162,24 @@ Item {
   property bool legacyArchiveRequested: false
   property bool historyArchiveStarted: false
   property string archiveWriteSignature: ""
+  // A clear can arrive before the archive files have finished loading. These
+  // flags make the merge discard the on-disk sources instead of resurrecting
+  // what the user just deleted.
+  property bool archiveClearPending: false
+  property var pendingForgottenStems: ({})
+  property bool historyReplayPending: false
+  property int archiveWriteRetries: 0
 
-  // How many notifications the old history directory keeps. Only the legacy
-  // replay path uses it now; the archive above is the real history.
+  // How many archive entries the fallback replay shows as toasts.
   readonly property int historyLimit: 10
 
   readonly property int lowPopupDuration: 5000
   readonly property int normalPopupDuration: 8000
   readonly property int maxPopupDuration: 30000
+  // A local sender can otherwise fill the screen and the state directory with
+  // non-expiring critical toasts. Eight is enough to read; the oldest is
+  // archived when a ninth arrives.
+  readonly property int maxPopups: 8
 
   function durationFor(urgency, expireTimeout) {
     switch (urgency) {
@@ -245,34 +258,11 @@ Item {
     return flags
   }
 
-  function archiveDocuments(text) {
-    var whole = null
-    try { whole = JSON.parse(text) } catch (e) { whole = null }
-    if (whole) {
-      if (Array.isArray(whole)) return whole
-      if (Array.isArray(whole.entries)) return whole.entries
-      return []
-    }
-    // The legacy history directory is one compact JSON object per line.
-    var out = []
-    var lines = text.split("\n")
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i].trim()
-      if (!line) continue
-      try {
-        var value = JSON.parse(line)
-        if (value && typeof value === "object") out.push(value)
-      } catch (e) {
-        // Torn write from a crash mid-save — skip the line, keep the rest.
-      }
-    }
-    return out
-  }
-
   function mergeArchiveRaw(raw) {
+    if (service.archiveClearPending) return
     var text = String(raw || "").trim()
     if (!text) return
-    var source = archiveDocuments(text)
+    var source = NotificationLogic.archiveDocuments(text)
     if (!source.length) return
 
     var byStem = {}
@@ -282,7 +272,8 @@ Item {
     }
     for (var j = 0; j < source.length; j++) {
       var entry = normalizeArchiveEntry(source[j])
-      if (entry.timestamp > 0) byStem[entry.stem] = entry
+      if (entry.timestamp > 0 && !service.pendingForgottenStems[entry.stem])
+        byStem[entry.stem] = entry
     }
 
     var merged = []
@@ -303,11 +294,11 @@ Item {
   }
 
   function appendArchiveEntry(value) {
-    if (!value) return
+    if (!value) return false
     var entry = normalizeArchiveEntry(value)
-    if (!entry.timestamp || entry.timestamp <= 0) return
+    if (!entry.timestamp || entry.timestamp <= 0) return false
     var cutoff = Date.now() - service.archiveRetentionDays * 86400000
-    if (entry.timestamp < cutoff) return
+    if (entry.timestamp < cutoff) return false
 
     var list = []
     var replaced = false
@@ -331,6 +322,7 @@ Item {
     service.archiveEntries = list
     service.queueImageCleanup(dropped)
     service.scheduleArchiveSave()
+    return true
   }
 
   function pruneArchive() {
@@ -351,7 +343,10 @@ Item {
 
   function removeArchiveEntry(stem) {
     var needle = String(stem || "")
-    if (!needle) return false
+    // Archive stems are always <timestamp>-<originalId>. Reject anything
+    // else before it can reach a file cleanup command.
+    if (!/^[0-9]+-[0-9]+$/.test(needle)) return false
+    if (!service.archiveLoaded) service.pendingForgottenStems[needle] = true
     var keep = []
     var removed = []
     for (var i = 0; i < service.archiveEntries.length; i++) {
@@ -359,7 +354,7 @@ Item {
       if (entry && entry.stem === needle) removed.push(entry)
       else keep.push(entry)
     }
-    if (removed.length === 0) return false
+    if (removed.length === 0) return !service.archiveLoaded
     service.archiveEntries = keep
     service.queueImageCleanup(removed)
     service.scheduleArchiveSave()
@@ -369,11 +364,15 @@ Item {
   function clearArchive() {
     var removed = service.archiveEntries
     service.archiveEntries = []
+    service.archiveClearPending = true
+    service.pendingForgottenStems = ({})
     service.queueImageCleanup(removed)
     service.scheduleArchiveSave()
-    // The pre-split archive and its image copies are not used anymore; a
-    // clear must leave no copy of the cleared history behind.
-    enqueuePopupFileJob(["bash", "-c", 'rm -rf "$1"', "--", service.legacyDir])
+    // A clear must leave no second copy of the cleared history behind: the
+    // pre-split archive tree and the old per-file history directory both go.
+    enqueuePopupFileJob(["bash", "-c",
+      'rm -rf "$1"\nrm -f "$2"/*.json', "--",
+      service.legacyDir, service.historyDir])
   }
 
   // Kept as the IPC-facing name used by `notifications clear`.
@@ -400,19 +399,6 @@ Item {
       "--", imagesDir, service.legacyDir + "/images"]
     for (var k = 0; k < stems.length; k++) command.push(stems[k])
     enqueuePopupFileJob(command)
-  }
-
-  // Delete one notification by its file stem, whether it is still on screen
-  // or already in the archive.
-  function forgetEntry(stem) {
-    var needle = String(stem || "")
-    if (!needle) return false
-    for (var i = popupModel.count - 1; i >= 0; i--) {
-      var row = popupModel.get(i)
-      if (row && NotificationLogic.imageStem(row) === needle) service.dismissPopup(i)
-    }
-    service.removeArchiveEntry(needle)
-    return true
   }
 
   // Queue image removal until restorePopups() has rebuilt popupModel. The
@@ -448,9 +434,13 @@ Item {
       if (row) keep[NotificationLogic.imageStem(row)] = true
     }
     var stems = []
+    var seen = ({})
     for (var k = 0; k < entries.length; k++) {
       var stem = String((entries[k] && entries[k].stem) || NotificationLogic.imageStem(entries[k] || {}))
-      if (stem && !keep[stem] && stems.indexOf(stem) === -1) stems.push(stem)
+      if (stem && !keep[stem] && !seen[stem]) {
+        seen[stem] = true
+        stems.push(stem)
+      }
     }
     if (stems.length === 0) return
     var command = ["bash", "-c",
@@ -462,7 +452,9 @@ Item {
 
   function scheduleArchiveSave() {
     if (!service.archiveLoaded) return
-    archiveSaveTimer.restart()
+    // Throttle rather than debounce: a steady stream of notifications must
+    // not postpone persistence indefinitely.
+    if (!archiveSaveTimer.running) archiveSaveTimer.start()
   }
 
   function flushArchive() {
@@ -506,9 +498,15 @@ Item {
         service.archiveWritePending = false
         if (ok) {
           service.archiveWriteSignature = json
+          service.archiveWriteRetries = 0
           service.finishLegacyMigration()
         } else {
-          console.warn("notifications: archive write failed; keeping the previous archive for retry")
+          console.warn("notifications: archive write failed; retrying")
+          service.archiveWriteRetries = Math.min(5, service.archiveWriteRetries + 1)
+          if (service.archiveWriteRetries <= 5) {
+            archiveRetryTimer.interval = Math.min(30000, 1000 * Math.pow(2, service.archiveWriteRetries))
+            archiveRetryTimer.start()
+          }
         }
         if (service.archiveRewritePending) {
           service.archiveRewritePending = false
@@ -526,6 +524,10 @@ Item {
     service.scheduleArchiveSave()
     service.sweepTempImages()
     service.flushPendingImageCleanup()
+    if (service.historyReplayPending) {
+      service.historyReplayPending = false
+      Qt.callLater(function() { service.showRecentHistory() })
+    }
   }
 
   // Called once the merged archive has actually been saved: the old archive
@@ -533,7 +535,13 @@ Item {
   function finishLegacyMigration() {
     if (!service.legacyArchiveCleanupPending) return
     service.legacyArchiveCleanupPending = false
-    enqueuePopupFileJob(["bash", "-c", 'rm -f "$1"', "--", service.legacyArchivePath])
+    // The merged archive is durable, so the old archive file and the
+    // per-file history directory can go. The legacy image tree stays: a
+    // surviving merged entry may still reference an image inside it, and a
+    // clear is the only operation that can safely remove the whole tree.
+    enqueuePopupFileJob(["bash", "-c",
+      'rm -f "$1"\nrm -f "$2"/*.json', "--",
+      service.legacyArchivePath, service.historyDir])
   }
 
   function sweepTempImages() {
@@ -553,7 +561,13 @@ Item {
       return
     }
     var persistable = NotificationLogic.persistablePopup(entry, imagesDir)
-    function finish() {
+    function finish(ok) {
+      if (ok === false) {
+        // The source vanished, was oversized, or could not be copied. Keep
+        // the text, drop the paths that no longer resolve.
+        persistable.entry.image = ""
+        persistable.entry.appIcon = ""
+      }
       service.appendArchiveEntry(persistable.entry)
       if (done) done()
     }
@@ -565,7 +579,7 @@ Item {
       "umask 077\n" +
       "mkdir -p \"$1\" || exit 0\n" +
       "chmod 700 \"$1\" 2>/dev/null || true\n" +
-      "shift\n" + service.copyImagesScript, "--", imagesDir]
+      "shift\n" + service.copyImagesScript + "exit $copies_failed\n", "--", imagesDir]
     for (var i = 0; i < persistable.copies.length; i++)
       command.push(persistable.copies[i].from, persistable.copies[i].to)
     enqueuePopupFileJob(command, finish)
@@ -583,6 +597,12 @@ Item {
     notification.closed.connect(function() {
       if (service.liveRefs[snapshot.originalId] === notification)
         delete service.liveRefs[snapshot.originalId]
+      // A sender can cancel a notification (a finished progress bar, a
+      // withdrawn alert). Removing its toast here keeps a dead row from
+      // sitting on screen forever and from being archived later.
+      Qt.callLater(function() {
+        service.removeClosedPopup(snapshot.originalId, snapshot.timestamp)
+      })
     })
 
     // DND bypass rules: chat apps abuse urgency=critical to force
@@ -608,6 +628,8 @@ Item {
     // Repeater is mid-incubation while we mutate its model.
     Qt.callLater(function() {
       removePopupsByOriginalId(snapshot.originalId, NotificationLogic.popupFileName(snapshot))
+      while (popupModel.count >= service.maxPopups)
+        service.removePopup(popupModel.count - 1, "overflow")
       popupModel.insert(0, snapshot)
       // An update that arrived while the insert was deferred found no row to
       // write to, and a property that already changed will not change again.
@@ -685,6 +707,17 @@ Item {
       return
     }
 
+    // Keep the row pointing at the persisted image copies when the sender
+    // only changed text. If it changed the image itself, keep the new source
+    // so persistPopupFile() copies it once.
+    var stem = NotificationLogic.imageStem(updated)
+    var sources = service.persistedSources[stem]
+    var persisted = service.persistedEntries[stem]
+    if (sources && persisted) {
+      if (updated.image === sources.image) updated.image = persisted.image
+      if (updated.appIcon === sources.appIcon) updated.appIcon = persisted.appIcon
+    }
+
     var roles = NotificationLogic.popupRoles()
     for (var i = 0; i < popupModel.count; i++) {
       var row = popupModel.get(i)
@@ -693,8 +726,9 @@ Item {
       for (var r = 0; r < roles.length; r++) popupModel.setProperty(i, roles[r], updated[roles[r]])
       // The file name is the timestamp and id this popup was persisted under,
       // so the rewrite lands on the same file: a restart restores the version
-      // last shown, and so does the copy that ends up in history.
-      if (service.captureToasts) persistPopupFile(updated)
+      // last shown, and so does the copy that ends up in history. Coalescing
+      // bursts keeps a progress notification from spawning one copy per tick.
+      service.schedulePopupPersist(updated)
       return
     }
   }
@@ -717,6 +751,16 @@ Item {
   // replacement shares the replaced row's filename, and the new write is
   // already queued — deleting that path here would erase the replacement's
   // only file.
+  function removeClosedPopup(originalId, timestamp) {
+    for (var i = popupModel.count - 1; i >= 0; i--) {
+      var row = popupModel.get(i)
+      if (!row || row.originalId !== originalId || row.timestamp !== timestamp) continue
+      if (isRestoredRow(row)) continue
+      service.removePopup(i, "closed")
+      return
+    }
+  }
+
   function removePopupsByOriginalId(originalId, keepFileName) {
     for (var i = popupModel.count - 1; i >= 0; i--) {
       var row = popupModel.get(i)
@@ -725,7 +769,10 @@ Item {
       // would silently kill a restored critical alert on an unrelated ping.
       if (isRestoredRow(row)) continue
       if (NotificationLogic.popupFileName(row) !== keepFileName) {
-        delete service.persistedEntries[NotificationLogic.imageStem(row)]
+        var replacedStem = NotificationLogic.imageStem(row)
+        delete service.persistedEntries[replacedStem]
+        delete service.persistedSources[replacedStem]
+        delete service.pendingPopupWrites[replacedStem]
         deletePopupFileFor(row)
       }
       popupModel.remove(i)
@@ -749,20 +796,28 @@ Item {
     // id would dismiss that unrelated notification at the server.
     var restored = isRestoredRow(entry)
     var ref = !restored && originalId >= 0 ? liveRefs[originalId] : null
-    // The popup is leaving the screen — for any reason — so its file must not
-    // survive to the next shell restart. Its persisted copy becomes the newest
-    // archive entry, and only the live JSON is deleted; archive images stay.
+    var archived = false
+    // The popup is leaving the screen — for any reason — so its live file must
+    // not survive to the next shell restart. A dismissed/expired toast becomes
+    // the newest archive entry; a sender-cancelled one is not history.
     if (entry) {
-      if (service.captureToasts && entry.originalId >= 0) {
-        var stem = NotificationLogic.imageStem(entry)
-        service.appendArchiveEntry(service.persistedEntries[stem] || entry)
-        delete service.persistedEntries[stem]
-      }
+      var removedStem = NotificationLogic.imageStem(entry)
+      var persisted = service.persistedEntries[removedStem]
+      delete service.pendingPopupWrites[removedStem]
+      if (reason !== "closed" && service.captureToasts && entry.originalId >= 0)
+        archived = service.appendArchiveEntry(persisted || entry)
+      delete service.persistedEntries[removedStem]
+      delete service.persistedSources[removedStem]
       service.deleteLivePopupFile(entry)
       if (restored) delete restoredPopups[NotificationLogic.popupFileName(entry)]
     }
     popupModel.remove(index)
-    if (ref) {
+    // When no archive entry kept the images, they are now orphaned. Wait
+    // until the row is out of the model so cleanupImages() no longer counts
+    // it as a live reference.
+    if (entry && !archived && entry.originalId >= 0)
+      service.cleanupImages([entry])
+    if (ref && reason !== "closed") {
       try {
         if (ref.tracked) {
           if (reason === "expire" && typeof ref.expire === "function") ref.expire()
@@ -845,7 +900,7 @@ Item {
       'chmod 700 "$2" "$3" "$4"\n' +
       'chmod 600 "$5" 2>/dev/null || true\n' +
       'chmod 600 "$2"/*.json "$3"/*.json "$4"/* 2>/dev/null || true\n' +
-      'rm -f "$5.tmp"',
+      'rm -f "$2"/*.tmp "$3"/*.tmp "$5.tmp"',
       "--", service.stateDir, service.popupStateDir, service.historyDir,
       service.imagesDir, service.archivePath]
     running: false
@@ -866,12 +921,8 @@ Item {
   // match these rows against fresh notifications.
   property var restoredPopups: ({})
 
-  // Entries are either { command, done } for a file job or { read: true } for
-  // a replay's directory read. Queueing the read rather than running it beside
-  // the queue is what makes it a barrier: it takes its place in line, so the
-  // history it sees is the one that existed when the replay was asked for.
-  // Everything queued after it — a clear, an archive, a silenced write — waits
-  // for it, and no amount of later traffic can push it back.
+  // Serialized file jobs: writes, deletes, copies and archive saves take
+  // their turn so an operation queued after a write sees the written state.
   property var popupFileQueue: []
 
   // Done callback and private stdin payload of the job popupFileProc is
@@ -890,22 +941,12 @@ Item {
     runNextPopupFileJob()
   }
 
-  function enqueueHistoryRead() {
-    popupFileQueue = popupFileQueue.concat([{ read: true }])
-    runNextPopupFileJob()
-  }
-
   function runNextPopupFileJob() {
-    if (readHistoryProc.running || popupFileProc.running) return
+    if (popupFileProc.running) return
     if (popupFileQueue.length === 0) return
 
     var job = popupFileQueue[0]
     popupFileQueue = popupFileQueue.slice(1)
-
-    if (job.read) {
-      startHistoryRead()
-      return
-    }
 
     popupFileProc.command = job.command
     service.runningPopupFileJobDone = job.done || null
@@ -942,9 +983,10 @@ Item {
   // sender-controlled and may grow, block, or become a FIFO mid-copy, and
   // must neither hang the serialized queue nor fill the state dir.
   readonly property string copyImagesScript:
+    "copies_failed=0\n" +
     "while (( $# >= 2 )); do\n" +
     "  if [[ -f $1 ]] && timeout 5 head -c 5242881 -- \"$1\" > \"$2.tmp\" 2>/dev/null &&\n" +
-    "     (( $(stat -c%s -- \"$2.tmp\") <= 5242880 )); then mv -f -- \"$2.tmp\" \"$2\"; else rm -f -- \"$2.tmp\"; fi\n" +
+    "     (( $(stat -c%s -- \"$2.tmp\") <= 5242880 )); then mv -f -- \"$2.tmp\" \"$2\"; else rm -f -- \"$2.tmp\"; copies_failed=1; fi\n" +
     "  shift 2\n" +
     "done\n"
 
@@ -955,8 +997,28 @@ Item {
     // The mkdir guards notifications that arrive before ensureDirsProc has
     // run; copies run before the JSON referencing them, while the source
     // exists.
+    var stem = NotificationLogic.imageStem(snapshot)
+    var previous = service.persistedSources[stem] || ({})
+    var sourceImage = snapshot.image
+    var sourceIcon = snapshot.appIcon
     var persistable = NotificationLogic.persistablePopup(snapshot, imagesDir)
-    service.persistedEntries[NotificationLogic.imageStem(snapshot)] = persistable.entry
+    for (var c = 0; c < persistable.copies.length; c++) {
+      var copy = persistable.copies[c]
+      if (String(copy.to).indexOf("-image") >= 0) sourceImage = copy.from
+      if (String(copy.to).indexOf("-appIcon") >= 0) sourceIcon = copy.from
+    }
+    service.persistedSources[stem] = {
+      image: persistable.copies.length > 0 && sourceImage !== previous.image
+        ? sourceImage : (previous.image !== undefined ? previous.image : sourceImage),
+      appIcon: persistable.copies.length > 0 && sourceIcon !== previous.appIcon
+        ? sourceIcon : (previous.appIcon !== undefined ? previous.appIcon : sourceIcon)
+    }
+    // From here on the model row points at the copies, not the sender's
+    // temporary files, so an in-place update with the same image does not
+    // copy it again.
+    snapshot.image = persistable.entry.image
+    snapshot.appIcon = persistable.entry.appIcon
+    service.persistedEntries[stem] = persistable.entry
     var command = ["bash", "-c",
       "umask 077\n" +
       "mkdir -p \"$1\" \"$2\" || exit 0\n" +
@@ -973,8 +1035,47 @@ Item {
       NotificationLogic.popupFileName(snapshot)]
     for (var i = 0; i < persistable.copies.length; i++)
       command.push(persistable.copies[i].from, persistable.copies[i].to)
-    enqueuePopupFileJob(command, null,
-      NotificationLogic.serializePopup(persistable.entry, NotificationUrgency.Normal))
+    command[2] += "exit $copies_failed\n"
+    enqueuePopupFileJob(command, function(ok) {
+      if (ok !== false || !service.hasLiveStem(stem)) return
+      // Rewrite without the image paths that failed to copy. Keeping the
+      // JSON is more useful than a toast that restores as a broken image.
+      snapshot.image = ""
+      snapshot.appIcon = ""
+      service.persistedSources[stem] = { image: "", appIcon: "" }
+      service.persistPopupFile(snapshot)
+    }, NotificationLogic.serializePopup(persistable.entry, NotificationUrgency.Normal))
+  }
+
+  function schedulePopupPersist(snapshot) {
+    if (!service.captureToasts) return
+    service.pendingPopupWrites[NotificationLogic.imageStem(snapshot)] = snapshot
+    popupPersistTimer.restart()
+  }
+
+  function hasLiveStem(stem) {
+    for (var i = 0; i < popupModel.count; i++) {
+      var row = popupModel.get(i)
+      if (row && NotificationLogic.imageStem(row) === stem) return true
+    }
+    return false
+  }
+
+  function flushPopupWrites() {
+    var pending = service.pendingPopupWrites
+    service.pendingPopupWrites = ({})
+    for (var key in pending) {
+      // A toast can expire or be dismissed inside the debounce window. Do
+      // not write its file back after removePopup() deleted it.
+      if (service.hasLiveStem(key)) service.persistPopupFile(pending[key])
+    }
+  }
+
+  Timer {
+    id: popupPersistTimer
+    interval: 250
+    repeat: false
+    onTriggered: service.flushPopupWrites()
   }
 
   function deletePopupFileFor(row) {
@@ -986,50 +1087,9 @@ Item {
       popupStateDir, NotificationLogic.imageStem(row), imagesDir])
   }
 
-  Process {
-    id: readHistoryProc
-    running: false
-    // Let the file queue go again, whatever the read did — a failed or empty
-    // read must not leave archives and clears parked behind it forever.
-    onExited: service.runNextPopupFileJob()
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: service.replayHistory(text)
-    }
-  }
-
-  // Toasts that were on screen when the replay was asked for. The clear in
-  // replayHistory archives them, but the directory read is already in flight
-  // by then, so they're handed over in memory instead of being waited for.
-  property var replayCarryOver: []
-
-  // Set from the moment a read is queued until it starts, so a second
-  // showHistory while one is still waiting its turn doesn't queue another.
-  property bool historyReadQueued: false
-
-  // Re-show what's in historyDir as toasts. The read goes through the file
-  // queue and its own subprocess, so the replay lands in replayHistory once
-  // the work queued ahead of it has finished.
-  function showRecentHistory() {
-    if (readHistoryProc.running || service.historyReadQueued) return "ok"
-    service.replayCarryOver = liveRowsForReplay()
-    service.historyReadQueued = true
-    enqueueHistoryRead()
-    return "ok"
-  }
-
-  function startHistoryRead() {
-    service.historyReadQueued = false
-    readHistoryProc.command = ["bash", "-c",
-      "awk 1 \"$1\"/*.json 2>/dev/null || true", "--", historyDir]
-    readHistoryProc.running = true
-  }
-
-  // Copy the on-screen rows out of the model. The placeholder from an earlier
-  // empty replay carries originalId -1 and is not a notification, so it is
-  // left behind rather than replayed as one. The replay dismisses these
-  // notifications, and senders delete their images on close — so the carried
-  // rows point at the persisted copies, like the archived files they join.
+  // Toasts that are on screen are part of the most recent history. They are
+  // copied out of the model (pointing at their persisted image copies) and
+  // merged with the archive by file stem.
   function liveRowsForReplay() {
     var rows = []
     for (var i = 0; i < popupModel.count; i++) {
@@ -1052,13 +1112,44 @@ Item {
     return rows
   }
 
-  function replayHistory(raw) {
-    var rows = NotificationLogic.historyRows(
-      raw, service.replayCarryOver, NotificationUrgency.Normal, service.historyLimit)
-    service.replayCarryOver = []
+  function archiveReplayRows() {
+    var rows = []
+    var seen = ({})
+    function add(list) {
+      for (var i = 0; i < list.length; i++) {
+        var entry = NotificationLogic.historyEntry(list[i], NotificationUrgency.Normal)
+        if (!entry || !entry.timestamp || entry.timestamp <= 0) continue
+        var key = NotificationLogic.popupFileName(entry)
+        if (seen[key]) continue
+        seen[key] = true
+        entry.stem = NotificationLogic.imageStem(entry)
+        rows.push(entry)
+      }
+    }
+    // Live rows first: they win a same-stem collision with the archive copy.
+    add(service.liveRowsForReplay())
+    add(service.archiveEntries)
+    rows.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0) })
+    return rows.slice(0, service.historyLimit)
+  }
 
-    // Replaying nothing at all looks like a dead keybinding, so say so.
-    if (rows.length === 0) {
+  // Re-show the newest notifications as toasts. The archive is the history
+  // now; reading the vestigial per-file directory showed stale data and could
+  // replay entries the user had already cleared.
+  function showRecentHistory() {
+    if (!service.archiveLoaded) {
+      service.historyReplayPending = true
+      service.startArchiveLoad()
+      return "ok"
+    }
+    service.replayRows(service.archiveReplayRows())
+    return "ok"
+  }
+
+  function replayRows(rows) {
+    var list = Array.isArray(rows) ? rows : []
+    if (list.length === 0) {
+      service.clearPopups()
       popupModel.insert(0, {
         id: -1,
         originalId: -1,
@@ -1076,15 +1167,15 @@ Item {
       return
     }
 
-    clearPopups()
+    service.clearPopups()
     // Rows arrive newest-first, and index 0 is the top of the toast stack.
-    for (var i = 0; i < rows.length; i++) {
+    for (var i = 0; i < list.length && i < service.maxPopups; i++) {
       // Replayed rows are restored rows: their notification died with the
       // sender long ago, so they must never resolve to a live server object
       // that has since been handed their old id.
-      service.restoredPopups[NotificationLogic.popupFileName(rows[i])] = true
-      service.persistedEntries[NotificationLogic.imageStem(rows[i])] = rows[i]
-      popupModel.append(rows[i])
+      service.restoredPopups[NotificationLogic.popupFileName(list[i])] = true
+      service.persistedEntries[NotificationLogic.imageStem(list[i])] = list[i]
+      popupModel.append(list[i])
     }
   }
 
@@ -1127,6 +1218,13 @@ Item {
         delete entry.deadline
       }
       live.push(entry)
+    }
+    while (live.length > service.maxPopups) {
+      var overflow = live.pop()
+      service.appendArchiveEntry(overflow)
+      service.deleteLivePopupFile(overflow)
+      delete service.persistedEntries[NotificationLogic.imageStem(overflow)]
+      delete service.persistedSources[NotificationLogic.imageStem(overflow)]
     }
     if (live.length === 0) {
       service.popupsRestored = true
@@ -1264,7 +1362,10 @@ Item {
     } else if (parsed && parsed.screen) {
       selected.push(String(parsed.screen))
     }
-    if (selected.length > 0) service.toastScreenNames = selected
+    // An explicit empty list is meaningful: the engine's toastScreens
+    // fallback then selects the first output instead of keeping a monitor
+    // the user just removed.
+    service.toastScreenNames = selected
   }
 
   // ---------------------------------------------------- archive loading
@@ -1342,6 +1443,13 @@ Item {
     onTriggered: service.flushArchive()
   }
 
+  Timer {
+    id: archiveRetryTimer
+    interval: 2000
+    repeat: false
+    onTriggered: service.flushArchive()
+  }
+
   function startArchiveLoad() {
     if (service.archiveLoadStarted) return
     service.archiveLoadStarted = true
@@ -1404,11 +1512,9 @@ Item {
       return dndState()
     }
 
-    // The center is the history surface now. Fall back to the upstream toast
-    // replay when the bar host is not reachable.
+    // Third-party services cannot summon the center through the shell API;
+    // replay the archive instead. This is also the upstream toast replay.
     function showHistory(): string {
-      if (service.shell && typeof service.shell.summon === "function"
-          && service.shell.summon("apach.notifications", "{}")) return "ok"
       return service.showRecentHistory()
     }
 
@@ -1435,6 +1541,22 @@ Item {
       if (popupModel.count === 0) return "none"
       service.invokePopupDefault(0)
       return "ok"
+    }
+
+    // Exact, stem-based dismissal used by the center. Timestamp and
+    // original id form the file stem; matching it cannot hit a different
+    // toast that happens to share a summary substring.
+    function dismissStem(stem: string): string {
+      var needle = String(stem || "")
+      if (!/^[0-9]+-[0-9]+$/.test(needle)) return "none"
+      for (var i = popupModel.count - 1; i >= 0; i--) {
+        var row = popupModel.get(i)
+        if (row && NotificationLogic.imageStem(row) === needle) {
+          service.dismissPopup(i)
+          return "ok"
+        }
+      }
+      return "none"
     }
 
     // Take a toast off the screen by summary substring, used by the
@@ -1640,7 +1762,6 @@ Item {
               body: cardSlot.body
               image: cardSlot.image
               urgency: cardSlot.urgency
-              timestamp: cardSlot.timestamp
               cornerRadius: service.cornerRadius
               fontFamily: service.shell && service.shell.bar ? service.shell.bar.fontFamily : ""
               glyph: cardSlot.glyph
