@@ -494,6 +494,16 @@ function parsePopupFiles(raw, normalUrgency) {
 // next step. "idle" means the desired state is already durable; "rewrite"
 // means a different payload is in flight and the desired state must be
 // re-written once it lands; "write" starts a new write now.
+// Async archive work (a DND-silenced image copy, a startup restore) captures
+// the generation it started under. Clear all increments the service
+// generation; a completion from an older generation must be discarded instead
+// of appending text the user just cleared.
+function archiveGenerationAllows(captured, current) {
+  var a = Number(captured)
+  var b = Number(current)
+  return isFinite(a) && isFinite(b) && a === b
+}
+
 function archiveFlushDecision(json, signature, pending) {
   if (json === signature) return pending ? "rewrite" : "idle"
   return pending ? "rewrite" : "write"
@@ -585,6 +595,7 @@ if (typeof module !== "undefined") {
     parsePopupFiles: parsePopupFiles,
     popupExpired: popupExpired,
     popupPlacement: popupPlacement,
-    archiveFlushDecision: archiveFlushDecision
+    archiveFlushDecision: archiveFlushDecision,
+    archiveGenerationAllows: archiveGenerationAllows
   }
 }

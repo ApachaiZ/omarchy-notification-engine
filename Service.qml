@@ -169,6 +169,10 @@ Item {
   property var pendingForgottenStems: ({})
   property bool historyReplayPending: false
   property int archiveWriteRetries: 0
+  // Incremented by every clear. Async archive work captures this before its
+  // copy job and refuses to append if a clear happened while it was queued.
+  property int archiveGeneration: 0
+  property int restoreArchiveGeneration: 0
 
   // How many archive entries the fallback replay shows as toasts.
   readonly property int historyLimit: 10
@@ -293,8 +297,11 @@ Item {
     service.queueImageCleanup(dropped)
   }
 
-  function appendArchiveEntry(value) {
+  function appendArchiveEntry(value, generation) {
     if (!value) return false
+    if (generation !== undefined
+        && !NotificationLogic.archiveGenerationAllows(generation, service.archiveGeneration))
+      return false
     var entry = normalizeArchiveEntry(value)
     if (!entry.timestamp || entry.timestamp <= 0) return false
     var cutoff = Date.now() - service.archiveRetentionDays * 86400000
@@ -362,6 +369,7 @@ Item {
   }
 
   function clearArchive() {
+    service.archiveGeneration += 1
     var removed = service.archiveEntries
     service.archiveEntries = []
     service.archiveClearPending = true
@@ -560,16 +568,25 @@ Item {
       if (done) done()
       return
     }
+    var generation = service.archiveGeneration
     var persistable = NotificationLogic.persistablePopup(entry, imagesDir)
     function finish(ok) {
+      if (!NotificationLogic.archiveGenerationAllows(generation, service.archiveGeneration)) {
+        // Clear all ran while this copy was queued or running. Do not
+        // resurrect the captured text; remove the now-unreferenced copies
+        // and let the silenced sender be released.
+        service.cleanupImages([persistable.entry])
+        if (done) done(false)
+        return
+      }
       if (ok === false) {
         // The source vanished, was oversized, or could not be copied. Keep
         // the text, drop the paths that no longer resolve.
         persistable.entry.image = ""
         persistable.entry.appIcon = ""
       }
-      service.appendArchiveEntry(persistable.entry)
-      if (done) done()
+      service.appendArchiveEntry(persistable.entry, generation)
+      if (done) done(true)
     }
     if (persistable.copies.length === 0) {
       finish()
@@ -644,7 +661,11 @@ Item {
   // object without a second onNotification — releasing on a stale snapshot
   // would drop it. Each catch-up write reuses the original file identity.
   function writeSilenced(notification, written) {
-    writeArchiveEntry(written, function() {
+    writeArchiveEntry(written, function(accepted) {
+      if (accepted === false) {
+        service.releaseSilenced(notification, written.originalId)
+        return
+      }
       var updated = null
       try {
         updated = NotificationLogic.replacementSnapshot(notification, written.originalId, written.timestamp)
@@ -1188,8 +1209,35 @@ Item {
     }
   }
 
+  function discardRestoredEntries(entries) {
+    var cleanup = []
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i]
+      var stem = NotificationLogic.imageStem(entry)
+      cleanup.push(entry)
+      // A fresh notification can have reused this file identity while the
+      // restore read was in flight; leave that one alone.
+      if (service.hasLiveStem(stem)) continue
+      service.deleteLivePopupFile(entry)
+      delete service.persistedEntries[stem]
+      delete service.persistedSources[stem]
+    }
+    service.cleanupImages(cleanup)
+  }
+
   function restorePopups(raw) {
     var entries = NotificationLogic.parsePopupFiles(raw, NotificationUrgency.Normal)
+    var generation = service.restoreArchiveGeneration
+    var stale = service.archiveClearPending
+      || !NotificationLogic.archiveGenerationAllows(generation, service.archiveGeneration)
+    if (stale) {
+      // Clear all landed while the startup read was in flight. Everything in
+      // this snapshot predates the clear, so neither archive it nor show it.
+      service.discardRestoredEntries(entries)
+      service.popupsRestored = true
+      service.flushPendingImageCleanup()
+      return
+    }
     var now = Date.now()
     var live = []
     for (var i = 0; i < entries.length; i++) {
@@ -1200,7 +1248,7 @@ Item {
       if (NotificationLogic.popupExpired(entry, duration, now)) {
         // It would have expired on screen had the shell kept running, so it
         // gets archived exactly like an expiry that happened while it did.
-        service.appendArchiveEntry(entry)
+        service.appendArchiveEntry(entry, generation)
         service.deleteLivePopupFile(entry)
         delete service.persistedEntries[stem]
         continue
@@ -1221,7 +1269,7 @@ Item {
     }
     while (live.length > service.maxPopups) {
       var overflow = live.pop()
-      service.appendArchiveEntry(overflow)
+      service.appendArchiveEntry(overflow, generation)
       service.deleteLivePopupFile(overflow)
       delete service.persistedEntries[NotificationLogic.imageStem(overflow)]
       delete service.persistedSources[NotificationLogic.imageStem(overflow)]
@@ -1233,6 +1281,13 @@ Item {
     }
 
     Qt.callLater(function() {
+      if (service.archiveClearPending
+          || !NotificationLogic.archiveGenerationAllows(generation, service.archiveGeneration)) {
+        service.discardRestoredEntries(live)
+        service.popupsRestored = true
+        service.flushPendingImageCleanup()
+        return
+      }
       for (var j = 0; j < live.length; j++) {
         var restored = live[j]
         // A notification received while the restore was reading the dir can
@@ -1483,6 +1538,7 @@ Item {
       // glue itself onto the next file and take a valid popup down with it.
       restorePopupsProc.command = ["bash", "-c",
         "awk 1 \"$1\"/*.json 2>/dev/null || true", "--", service.popupStateDir]
+      service.restoreArchiveGeneration = service.archiveGeneration
       restorePopupsProc.running = true
     })
   }

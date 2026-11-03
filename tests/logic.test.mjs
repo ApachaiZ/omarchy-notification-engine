@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
+import { readFileSync } from "node:fs"
 
 const require = createRequire(import.meta.url)
 const Logic = require("../NotificationLogic.js")
@@ -125,6 +126,29 @@ test("archive writes recheck the pending state (A to B to A)", () => {
   assert.equal(d(empty, empty, true), "rewrite")
   // Clear back to A while an unrelated C is pending must also recheck.
   assert.equal(d(empty, nonempty, true), "rewrite")
+})
+
+test("a queued DND archive copy cannot append after Clear all", () => {
+  const allows = Logic.archiveGenerationAllows
+  const beforeClear = 3
+  const afterClear = 4
+  // The copy captured generation 3, then Clear all incremented to 4 while the
+  // image job was queued or running. Its completion must be discarded.
+  assert.equal(allows(beforeClear, afterClear), false)
+  // A write that starts after the clear belongs to the new generation.
+  assert.equal(allows(afterClear, afterClear), true)
+  assert.equal(allows(beforeClear, beforeClear), true)
+  // Missing generations fail closed.
+  assert.equal(allows(undefined, afterClear), false)
+  assert.equal(allows(NaN, 0), false)
+})
+
+test("the DND copy path is fenced by the clear generation", () => {
+  const source = readFileSync(new URL("../Service.qml", import.meta.url), "utf8")
+  assert.match(source, /function clearArchive\(\) \{\s*service\.archiveGeneration \+= 1/)
+  assert.match(source, /function writeArchiveEntry\([\s\S]*?var generation = service\.archiveGeneration/)
+  assert.match(source, /archiveGenerationAllows\(generation, service\.archiveGeneration\)[\s\S]*?done\(false\)/)
+  assert.match(source, /appendArchiveEntry\(persistable\.entry, generation\)/)
 })
 
 test("click actions are structurally bounded", () => {

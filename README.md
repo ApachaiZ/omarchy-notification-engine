@@ -101,8 +101,10 @@ inside it never rely on directory permissions alone.
   payload still queued is flagged for a corrective rewrite, so clearing history
   while a write is in flight cannot resurrect the cleared text after a
   restart. A failed archive write is retried with backoff instead of being
-  silently dropped. At most eight toasts are shown at once; the oldest is
-  archived when a ninth arrives.
+  silently dropped. A clear increments an archive generation, so a
+  DND-silenced image copy or startup restore that began before the clear is
+  discarded and its copies are pruned instead of re-adding old text. At most
+  eight toasts are shown at once; the oldest is archived when a ninth arrives.
 
 ## Remove
 
