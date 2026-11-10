@@ -13,6 +13,8 @@ import "../NotificationLogic.js" as NotificationLogic
 BorderSurface {
   id: root
 
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("../i18n") }
+
   property string app: ""
   property string appIcon: ""
   property string summary: ""
@@ -198,7 +200,7 @@ BorderSurface {
 
           Text {
             textFormat: Text.PlainText
-            text: root.urgency === 2 ? "CRITICAL" : (root.urgency === 0 ? "LOW" : "")
+            text: root.urgency === 2 ? strings.t("card.urgencyCritical") : (root.urgency === 0 ? strings.t("card.urgencyLow") : "")
             color: root.accentColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -275,7 +277,7 @@ BorderSurface {
     visible: root.hovered
     size: Style.space(22)
     iconText: "󰅖"
-    tooltipText: "Dismiss"
+    tooltipText: strings.t("card.dismiss")
     foreground: root.dimColor
     hoverColor: Commons.Color.urgent
     fontFamily: root.fontFamily

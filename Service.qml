@@ -7,12 +7,15 @@ import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Services.Notifications
 import qs.Commons
+import qs.Commons as Commons
 
 import "components"
 import "NotificationLogic.js" as NotificationLogic
 
 Item {
   id: service
+
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
   // Injected by omarchy-shell (the first-party service loader).
   property var shell: null
@@ -1176,7 +1179,7 @@ Item {
         originalId: -1,
         app: "omarchy-action",
         appIcon: "",
-        summary: "No recent notifications",
+        summary: strings.t("history.empty"),
         body: "",
         image: "",
         glyph: "󰂚",
